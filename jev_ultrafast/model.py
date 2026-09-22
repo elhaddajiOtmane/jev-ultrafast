@@ -78,6 +78,98 @@ def action_space(actions):
     return elements, targets, controls
 
 
+def choose_llm(operations, targets, state, goal, history):
+    key = os.environ.get("TEXT_MODEL_API_KEY")
+    if not key:
+        raise ValueError("Neither TYPESAFE_API_KEY nor TEXT_MODEL_API_KEY was provided.")
+    base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
+    model = os.environ.get("TEXT_MODEL", "deepseek-chat")
+    reasoning = {"thinking": {"type": "disabled"}} if "api.deepseek.com/" in base else {"reasoning": {"effort": "low"}}
+    if os.environ.get("TEXT_MODEL_REASONING") == "none":
+        reasoning = {"reasoning": {"enabled": False}}
+
+    system_prompt = (
+        "You are an ultrafast browser agent controller. "
+        "Choose the single best NEXT action to advance the user's goal.\n"
+        f"{NEXT_ACTION}\n{TARGET}\n"
+        "Return a JSON object with exactly:\n"
+        "- \"operation\": one of the offered operations\n"
+        "- \"target\": the target element index string (e.g. \"1\", \"2\", \"3\") if the operation requires a target; "
+        "otherwise null."
+    )
+    user_payload = {
+        "goal": goal,
+        "page": {"url": state.get("url"), "title": state.get("title"), "text": state.get("text", "")[:3000]},
+        "recent_actions": [
+            {k: h.get(k) for k in ("action", "kind", "text", "page_changed")} for h in history[-10:]
+        ],
+        "available_operations": operations,
+        "available_targets": {
+            op: {
+                idx: (
+                    f"[{idx}] {cand.get('label', '')} "
+                    f"(role: {cand.get('role', '')}, value: {cand.get('current_value', cand.get('value', ''))})"
+                )
+                for idx, cand in candidates.items()
+            }
+            for op, candidates in targets.items()
+        },
+    }
+    result = post_json(
+        base + "/chat/completions",
+        key,
+        {
+            "model": model,
+            "max_tokens": 512,
+            "response_format": {"type": "json_object"},
+            **reasoning,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps(user_payload)},
+            ],
+        },
+    )
+    raw_content = result["choices"][0]["message"]["content"].strip()
+    if raw_content.startswith("```json"):
+        raw_content = raw_content[7:]
+    if raw_content.startswith("```"):
+        raw_content = raw_content[3:]
+    if raw_content.endswith("```"):
+        raw_content = raw_content[:-3]
+    try:
+        parsed = json.loads(raw_content.strip())
+    except json.JSONDecodeError:
+        parsed = {}
+
+    op = parsed.get("operation")
+    if op not in operations:
+        matches = [k for k in operations if k.lower() == str(op).lower()]
+        op = matches[0] if matches else ("DONE" if "DONE" in operations else next(iter(operations)))
+
+    answers = {
+        "operation": {
+            "choice": op,
+            "confidence": 1.0,
+            "probabilities": {k: float(k == op) for k in operations},
+        }
+    }
+    if op in targets:
+        target_candidates = targets[op]
+        tgt = str(parsed.get("target"))
+        if tgt not in target_candidates:
+            tgt = next(iter(target_candidates))
+        answers[op.lower() + "_target"] = {
+            "choice": tgt,
+            "confidence": 1.0,
+            "probabilities": {k: float(k == tgt) for k in target_candidates},
+        }
+    return {
+        "answers": answers,
+        "model": f"{model} (openrouter)",
+        "usage": result.get("usage", {}),
+    }
+
+
 def choose(state, goal, history):
     elements, targets, controls = action_space(state["actions"])
     labels = {
@@ -116,7 +208,11 @@ def choose(state, goal, history):
         "questions": questions,
     }
     started = time.perf_counter()
-    result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body)
+    typesafe_key = os.environ.get("TYPESAFE_API_KEY")
+    if typesafe_key:
+        result = post_json("https://api.typesafe.ai/v1/systemone", typesafe_key, body)
+    else:
+        result = choose_llm(operations, targets, state, goal, history)
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
     target = None

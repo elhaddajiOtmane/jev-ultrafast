@@ -2,23 +2,60 @@
 
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
 # Atomically read visible content and controls, preserving actual DOM node identity.
-READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
+READ_STATE = Path(__file__).with_name("snapshot.js").read_text(encoding="utf-8")
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+
 
 class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
 
 
+def ensure_automation_browser():
+    """Ensure dedicated automation Chrome instance is listening on BU_CDP_URL."""
+    cdp_url = os.environ.get("BU_CDP_URL", "http://127.0.0.1:9333")
+    os.environ["BU_CDP_URL"] = cdp_url
+    try:
+        urllib.request.urlopen(f"{cdp_url.rstrip('/')}/json/version", timeout=1)
+        return
+    except Exception:
+        pass
+    candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    binary = next((p for p in candidates if Path(p).exists()), None)
+    if binary:
+        user_data = Path.home() / ".chrome-automation"
+        subprocess.Popen([
+            binary,
+            "--remote-debugging-port=9333",
+            f"--user-data-dir={user_data}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ])
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(f"{cdp_url.rstrip('/')}/json/version", timeout=1)
+                return
+            except Exception:
+                time.sleep(0.3)
+
+
 class Browser:
     def __init__(self, url):
+        ensure_automation_browser()
         ensure_daemon()
         self.target = cdp("Target.createTarget", url="about:blank", background=True)["targetId"]
         self.session = cdp("Target.attachToTarget", targetId=self.target, flatten=True)["sessionId"]
