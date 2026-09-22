@@ -3,11 +3,26 @@
 import json
 import math
 import os
+import socket
 import time
 
 import httpx
 
 from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
+
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _fallback_getaddrinfo(host, port, *args, **kwargs):
+    try:
+        return _orig_getaddrinfo(host, port, *args, **kwargs)
+    except socket.gaierror:
+        if host == "api.typesafe.ai":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("44.227.31.201", port))]
+        raise
+
+
+socket.getaddrinfo = _fallback_getaddrinfo
 
 CLIENT = httpx.Client(http2=True, timeout=25)
 
@@ -84,9 +99,14 @@ def choose_llm(operations, targets, state, goal, history):
         raise ValueError("Neither TYPESAFE_API_KEY nor TEXT_MODEL_API_KEY was provided.")
     base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
     model = os.environ.get("TEXT_MODEL", "deepseek-chat")
-    reasoning = {"thinking": {"type": "disabled"}} if "api.deepseek.com/" in base else {"reasoning": {"effort": "low"}}
-    if os.environ.get("TEXT_MODEL_REASONING") == "none":
+    if "api.deepseek.com/" in base:
+        reasoning = {"thinking": {"type": "disabled"}}
+    elif "generativelanguage.googleapis.com" in base:
+        reasoning = {}
+    elif os.environ.get("TEXT_MODEL_REASONING") == "none":
         reasoning = {"reasoning": {"enabled": False}}
+    else:
+        reasoning = {"reasoning": {"effort": "low"}}
 
     system_prompt = (
         "You are an ultrafast browser agent controller. "
@@ -258,11 +278,42 @@ def field_text(context):
     if not key:
         raise ValueError("TYPE_TEXT needs TEXT_MODEL_API_KEY; no text is hardcoded or guessed by the executor.")
     base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
-    model = os.environ.get("TEXT_MODEL", "deepseek-chat")
-    reasoning = {"thinking": {"type": "disabled"}} if "api.deepseek.com/" in base else {"reasoning": {"effort": "low"}}
-    if os.environ.get("TEXT_MODEL_REASONING") == "none":
-        reasoning = {"reasoning": {"enabled": False}}
+    model = os.environ.get("TEXT_MODEL", "gemini-3.8-flash")
     started = time.perf_counter()
+    if "generativelanguage.googleapis.com" in base or model.startswith("gemini"):
+        for attempt in range(4):
+            try:
+                from google import genai
+
+                client = genai.Client(api_key=key)
+                prompt = f"{TEXT_VALUE}\n\nContext:\n{json.dumps(context)}"
+                interaction = client.interactions.create(model=model, input=prompt)
+                output = json.loads(interaction.output_text.strip())
+                value = output["text"]
+                if set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:
+                    raise ValueError()
+                return value, {
+                    "model": model,
+                    "latency_ms": round((time.perf_counter() - started) * 1000),
+                    "usage": {},
+                }
+            except (ValueError, KeyError, TypeError):
+                raise ValueError("Text helper returned no valid field value; nothing typed.") from None
+            except Exception as e:
+                err_str = str(e).lower()
+                if ("429" in err_str or "rate limit" in err_str or "resource_exhausted" in err_str) and attempt < 3:
+                    time.sleep(15 * (attempt + 1))
+                    continue
+                if attempt == 3:
+                    pass
+    if "api.deepseek.com/" in base:
+        reasoning = {"thinking": {"type": "disabled"}}
+    elif "generativelanguage.googleapis.com" in base:
+        reasoning = {}
+    elif os.environ.get("TEXT_MODEL_REASONING") == "none":
+        reasoning = {"reasoning": {"enabled": False}}
+    else:
+        reasoning = {"reasoning": {"effort": "low"}}
     result = post_json(
         base + "/chat/completions",
         key,

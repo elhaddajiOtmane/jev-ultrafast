@@ -23,6 +23,8 @@ class StalePage(ValueError):
 
 def ensure_automation_browser():
     """Ensure dedicated automation Chrome instance is listening on BU_CDP_URL."""
+    if os.environ.get("BU_CDP_WS"):
+        return
     cdp_url = os.environ.get("BU_CDP_URL", "http://127.0.0.1:9333")
     os.environ["BU_CDP_URL"] = cdp_url
     try:
@@ -87,16 +89,15 @@ class Browser:
                     "Runtime.evaluate",
                     expression="""(action => new Promise(resolve => {
                       const field=window.__jevFast?.nodes.get(action.node);
-                      const autocomplete=action.kind==='fill' && field?.getAttribute('role')==='combobox';
+                      const isPopup=field?.getAttribute('role')==='combobox' || field?.getAttribute('aria-haspopup');
+                      const isCombo=action.kind==='fill' && field?.getAttribute('role')==='combobox';
+                      const autocomplete=isCombo || (action.kind==='click' && isPopup);
                       let frames=0, stopped=false;
                       const finish=()=>{stopped=true;resolve()};
                       setTimeout(finish,autocomplete ? 200 : 50);
                       const ready=()=>{
                         if (stopped) return;
-                        const ids=(field?.getAttribute('aria-controls')||field?.getAttribute('aria-owns')||'')
-                          .split(/\\s+/).filter(Boolean);
-                        const roots=ids.length ? ids.map(id=>document.getElementById(id)).filter(Boolean) : [document];
-                        const options=roots.flatMap(root=>[...root.querySelectorAll('[role="option"]')]);
+                        const options=[...document.querySelectorAll('[role="option"]')];
                         if (++frames>=2 && (!autocomplete || options.some(e=>{
                           const r=e.getBoundingClientRect();
                           return r.width && r.height && r.bottom>0 && r.top<innerHeight &&
