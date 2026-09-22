@@ -79,7 +79,7 @@ def action_space(actions):
 
 
 def choose_llm(operations, targets, state, goal, history):
-    key = os.environ.get("TEXT_MODEL_API_KEY")
+    key = os.environ.get("TEXT_MODEL_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not key:
         raise ValueError("Neither TYPESAFE_API_KEY nor TEXT_MODEL_API_KEY was provided.")
     base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
@@ -254,7 +254,7 @@ def field_context(goal, action, page, history):
 
 
 def field_text(context):
-    key = os.environ.get("TEXT_MODEL_API_KEY")
+    key = os.environ.get("TEXT_MODEL_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not key:
         raise ValueError("TYPE_TEXT needs TEXT_MODEL_API_KEY; no text is hardcoded or guessed by the executor.")
     base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
